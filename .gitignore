@@ -1,0 +1,3 @@
+*.pickle
+data/
+data_processed/
