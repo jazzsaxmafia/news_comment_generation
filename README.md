@@ -8,3 +8,6 @@
 * selenium, pandas, numpy, theano, BeautifulSoup, ipdb, scikit-learn, keras
 * konlpy 
  * https://github.com/konlpy/konlpy
+
+### https://github.com/jazzsaxmafia/news_comment_generation
+
