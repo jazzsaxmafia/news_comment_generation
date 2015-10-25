@@ -12,6 +12,7 @@ import os
 import ipdb
 import pandas as pd
 import numpy as np
+import optim
 
 from sklearn.feature_extraction.text import CountVectorizer
 from keras import initializations
@@ -44,7 +45,7 @@ class Comment_Generator():
         self.params = [
             self.emb,
             self.encode_W, self.encode_U, self.encode_b,
-            self.decode_W, self.decode_U, self.decode_b,
+            self.decode_W, self.decode_U, self.decode_V, self.decode_b,
             self.output_W, self.output_b,
             self.word_W, self.word_b
         ]
@@ -91,7 +92,6 @@ class Comment_Generator():
             f = T.nnet.sigmoid(lstm_preactive[:,self.hidden_dim:self.hidden_dim*2])
             o = T.nnet.sigmoid(lstm_preactive[:,self.hidden_dim*2:self.hidden_dim*3])
             c = T.tanh(lstm_preactive[:,self.hidden_dim*3:self.hidden_dim*4])
-
             c = f*c_tm_1 + i*c
             c = m_tm_1[:,None]*c + (1.-m_tm_1)[:,None]*c_tm_1
 
@@ -147,20 +147,23 @@ class Comment_Generator():
 
         output_shape = output_word.shape
 
-        probs = T.nnet.softmax(output_shape[0]*output_shape[1], output_shape[2])
+        probs = T.nnet.softmax(output_word.reshape([output_shape[0]*output_shape[1], output_shape[2]]))
 
-        encode_function = theano.function(
-                inputs=[news_sequence, news_mask],
-                outputs=context,
-                allow_input_downcast=True)
+        comment_flat = comment_sequence.flatten()
+        p_flat = probs.flatten()
 
-        decode_function = theano.function(
-                inputs=[news_sequence, news_mask, comment_sequence, comment_mask],
-                outputs=output_word,
-                allow_input_downcast=True)
+        cost = -T.log(p_flat[T.arange(comment_flat.shape[0])*probs.shape[1]+comment_flat] + 1e-8)
+        cost = cost.reshape([comment_sequence.shape[0], comment_sequence.shape[1]])
+        masked_cost = cost * comment_mask
 
-        return encode_function, decode_function
-
+        cost = (masked_cost).sum() / comment_mask.sum()
+        return [
+                cost,
+                news_sequence,
+                news_mask,
+               comment_sequence,
+                comment_mask
+                ]
 
 # 일단 vocabulary부터
 def get_vectorizer(data, n_max_words):
@@ -191,11 +194,14 @@ def split_dataset(data_path):
 
 def main():
     data_path = './data_processed/'
+    n_epochs = 100
     batch_size = 10
     n_max_words = 20000
     embedding_dim = 1024
     hidden_dim = 512
-    output_dim = n_max_words
+    decay_c = 0.0001
+    grad_clip=2.
+    learning_rate = 0.005
     split_dataset(data_path)
 
     trainset = pd.read_pickle('train.pickle')
@@ -206,35 +212,79 @@ def main():
     dictionary = pd.Series(vectorizer.vocabulary_)
 
     comment_generator = Comment_Generator(n_max_words, embedding_dim, hidden_dim)
-    encode_function, decode_function = comment_generator.build_model()
+    #train_function = comment_generator.build_model()
+    (
+        cost,
+        news_sequence,
+        news_mask,
+        comment_sequence,
+        comment_mask
+    ) = comment_generator.build_model()
 
-    for start, end in zip(
-            range(0, len(trainset)+batch_size, batch_size),
-            range(batch_size, len(trainset)+batch_size, batch_size)
-        ):
+    # l2 norm regularizer
+    if decay_c > 0. :
+        decay_c = theano.shared(np.float32(decay_c), name='decay_c')
+        weight_decay = 0.
 
-        news_word_index = map(lambda one_news: dictionary[one_news.split(' ')], trainset_news[start:end])
-        news_word_index = map(lambda x: x.values[~np.isnan(x.values)], news_word_index)
+        for param in comment_generator.params:
+            weight_decay += (param ** 2).sum()
 
-        news_maxlen = np.max(map(lambda x: len(x), news_word_index))
-        news_word = np.zeros((batch_size, news_maxlen))
-        news_mask = np.zeros((batch_size, news_maxlen))
+        weight_decay *= decay_c
+        cost += weight_decay
 
-        comment_word_index = map(lambda one_comment: dictionary[one_comment.split(' ')], trainset_comments[start:end])
-        comment_word_index = map(lambda x: x.values[~np.isnan(x.values)], comment_word_index)
+    # grad 너무 크면 clipping
+    grads = T.grad(cost=cost, wrt=comment_generator.params)
+    if grad_clip > 0.:
+        g2 = 0
+        for g in grads:
+            g2 += (g**2).sum()
+        new_grads=[]
 
-        comment_maxlen = np.max(map(lambda x: len(x), news_word_index))
-        comment_word = np.zeros((batch_size, comment_maxlen))
-        comment_mask = np.zeros((batch_size, comment_maxlen))
+        for g in grads:
+            new_grads.append(T.switch(g2 > (grad_clip**2),
+                                      g / T.sqrt(g2) * grad_clip,
+                                      g ))
+        grads = new_grads
 
-        for inds,arr in enumerate(news_word_index):
-            news_word[inds, :len(arr)] = arr
-            news_mask[inds, :len(arr)] = 1
+    lr = T.scalar('lr')
+    f_grad_shared, f_update = optim.sgd(
+            lr=lr,
+            params=comment_generator.params,
+            grads=grads,
+            inp=[news_sequence, news_mask, comment_sequence, comment_mask],
+            cost=cost)
 
-        for inds,arr in enumerate(comment_word_index):
-            comment_word[inds, :len(arr)] = arr
-            comment_mask[inds, :len(arr)] = 1
-        ipdb.set_trace()
-        output = decode_function(news_word, news_mask, comment_word, comment_mask)
+    for epoch in range(n_epochs):
+        for start, end in zip(
+                range(0, len(trainset)+batch_size, batch_size),
+                range(batch_size, len(trainset)+batch_size, batch_size)
+            ):
+
+            news_word_index = map(lambda one_news: dictionary[one_news.split(' ')], trainset_news[start:end])
+            news_word_index = map(lambda x: x.values[~np.isnan(x.values)], news_word_index)
+
+            news_maxlen = np.max(map(lambda x: len(x), news_word_index))
+            news_word = np.zeros((batch_size, news_maxlen))
+            news_m= np.zeros((batch_size, news_maxlen))
+
+            comment_word_index = map(lambda one_comment: dictionary[one_comment.split(' ')], trainset_comments[start:end])
+            comment_word_index = map(lambda x: x.values[~np.isnan(x.values)], comment_word_index)
+
+            comment_maxlen = np.max(map(lambda x: len(x), news_word_index))
+            comment_word = np.zeros((batch_size, comment_maxlen))
+            comment_m= np.zeros((batch_size, comment_maxlen))
+
+            for inds,arr in enumerate(news_word_index):
+                news_word[inds, :len(arr)] = arr
+                news_m[inds, :len(arr)] = 1
+
+            for inds,arr in enumerate(comment_word_index):
+                comment_word[inds, :len(arr)] = arr
+                comment_m[inds, :len(arr)] = 1
+
+            cost = f_grad_shared(news_word, news_m, comment_word, comment_m)
+            f_update(learning_rate)
+            print cost
+        learning_rate *= 0.99
 
 
