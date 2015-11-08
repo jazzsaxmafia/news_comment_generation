@@ -43,7 +43,15 @@ def adam(lr, params, grads, inp, cost):
 
     return f_grad_shared, f_update
 
-def sgd(lr, params, grads, inp, cost):
+def sgd(cost, params, lr):
+    grads = theano.tensor.grad(cost=cost, wrt=params)
+    updates = []
+
+    for param, grad in zip(params, grads):
+        updates.append([param, param-grad*lr])
+    return updates
+
+def sgd_2(lr, params, grads, inp, cost):
 
     # allocate gradients and set them all to zero
     gshared = [theano.shared(p.get_value() * 0.)

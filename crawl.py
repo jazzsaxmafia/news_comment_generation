@@ -19,26 +19,33 @@ for date in date_range:
     print "processing ", date_string
     news_list = []
     comment_list = []
-    driver.get('http://entertain.naver.com/ranking#type=hit_total&date='+date_string)
     try:
+        driver.get('http://entertain.naver.com/ranking#type=hit_total&date='+date_string)
         href_list = map(lambda x: x.get_attribute('href'), driver.find_elements_by_class_name('tit'))
     except:
         continue
 
     for href in href_list:
 
-        driver.get(href)
+        try:
+            driver.get(href)
+        except:
+            continue
+
         news_data = BeautifulSoup(urllib.urlopen(href).read())
 
-        news_body = news_data.find('div', {'id':'articeBody'}).text.strip()
+
+        #news_body = news_data.find('div', {'id':'articeBody'}).text.strip()
+        title = news_data.find('p', {'class':'end_tit'}).text
 
         iframe = driver.find_element_by_id('ifrMemo')
         driver.switch_to_frame(iframe)
         comments = map(lambda x: x.text, driver.find_elements_by_class_name('txt'))
+        comments = filter(lambda x: len(x.split(' ')) < 20, comments)
 
         driver.switch_to_default_content()
 
-        news_list.append(news_body)
+        news_list.append(title)
         comment_list.append(comments)
 
     dataframe = pd.DataFrame({'news':news_list, 'comments':comment_list})
