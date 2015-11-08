@@ -218,7 +218,14 @@ class Comment_Generator():
         h_list = self.encode_lstm( news_emb_dimshuffle, news_mask_dimshuffle )
         context = h_list[-1]
 
+        generated_sequence = self.generate_lstm(context)
 
+        f_generate = theano.function(
+                inputs=[news_sequence, news_mask],
+                outputs=generated_sequence,
+                allow_input_downcast=True)
+
+        return f_generate
 
 # 일단 vocabulary부터
 def get_vectorizer(data, n_max_words):
@@ -379,5 +386,8 @@ def generate_sequence():
         model = cPickle.load(f)
 
     testset = pd.read_pickle('test.pickle')
+    f_generate = model.build_tester()
+
+    ipdb.set_trace()
 
 
